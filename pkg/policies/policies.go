@@ -17,9 +17,9 @@
 package policies
 
 import (
-	"github.com/ossf/allstar/pkg/policies/binary"
 	"github.com/ossf/allstar/pkg/policies/branch"
 	"github.com/ossf/allstar/pkg/policies/outside"
+	"github.com/ossf/allstar/pkg/policies/public"
 	"github.com/ossf/allstar/pkg/policies/security"
 	"github.com/ossf/allstar/pkg/policydef"
 )
@@ -27,9 +27,10 @@ import (
 // GetPolicies returns a slice of all policies in Allstar.
 func GetPolicies() []policydef.Policy {
 	return []policydef.Policy{
-		binary.NewBinary(),
+		//binary.NewBinary(),
 		branch.NewBranch(),
 		outside.NewOutside(),
 		security.NewSecurity(),
+		public.NewPublic(),
 	}
 }

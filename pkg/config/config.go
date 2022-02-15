@@ -70,6 +70,9 @@ type OrgOptConfig struct {
 	// OptOutPublicRepos : set to true to not access public repos.
 	OptOutPublicRepos bool `yaml:"optOutPublicRepos"`
 
+	// OptOutArchivedRepos : set to true to not access archived repos.
+	OptOutArchivedRepos bool `yaml:"optOutArchivedRepos"`
+
 	// DisableRepoOverride : set to true to disallow repos from opt-in/out in
 	// their config.
 	DisableRepoOverride bool `yaml:"disableRepoOverride"`
@@ -176,6 +179,9 @@ func isEnabled(ctx context.Context, o OrgOptConfig, r RepoOptConfig, rep reposit
 			enabled = false
 		}
 		if o.OptOutPublicRepos && !gr.GetPrivate() {
+			enabled = false
+		}
+		if o.OptOutArchivedRepos && gr.GetArchived() {
 			enabled = false
 		}
 		if !o.DisableRepoOverride && r.OptOut {

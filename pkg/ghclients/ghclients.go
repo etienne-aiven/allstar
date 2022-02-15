@@ -19,12 +19,15 @@ package ghclients
 import (
 	"context"
 	"net/http"
+	"regexp"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v39/github"
 	"github.com/gregjones/httpcache"
 	"github.com/ossf/allstar/pkg/config/operator"
 	"gocloud.dev/runtimevar"
+	_ "gocloud.dev/runtimevar/awsparamstore"
+	_ "gocloud.dev/runtimevar/constantvar"
 	_ "gocloud.dev/runtimevar/gcpsecretmanager"
 )
 
@@ -94,14 +97,19 @@ func (g *GHClients) LogCacheSize() {
 }
 
 func getKeyReal(ctx context.Context) ([]byte, error) {
-	v, err := runtimevar.OpenVariable(ctx, operator.KeySecret)
-	if err != nil {
-		return nil, err
+	// if the KeySecret starts with a uri scheme, use runtimevar
+	// otherwise the secret is probably coming in as a clear-text value
+	if match, _ := regexp.MatchString("^[a-z]+://", operator.KeySecret); match {
+		v, err := runtimevar.OpenVariable(ctx, operator.KeySecret)
+		if err != nil {
+			return nil, err
+		}
+		defer v.Close()
+		s, err := v.Latest(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return s.Value.([]byte), nil
 	}
-	defer v.Close()
-	s, err := v.Latest(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return s.Value.([]byte), nil
+	return []byte(operator.KeySecret), nil
 }

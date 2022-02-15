@@ -47,7 +47,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		log.Info().
-			Err(enforce.EnforceJob(ctx, ghc, (5 * time.Minute))).
+			Err(enforce.EnforceJob(ctx, ghc, (12 * time.Hour))). // for aiven, just enforce every 12 hours
 			Msg("Enforce job shutting down.")
 	}()
 	sigs := make(chan os.Signal, 1)

@@ -107,8 +107,12 @@ type repositories interface {
 		*github.ListCollaboratorsOptions) ([]*github.User, *github.Response, error)
 	ListTeams(context.Context, string, string, *github.ListOptions) (
 		[]*github.Team, *github.Response, error)
-	AddCollaborator(context.Context, string, string, string,
-		*github.RepositoryAddCollaboratorOptions) (*github.CollaboratorInvitation, *github.Response, error)
+}
+
+type teams interface {
+	AddTeamRepoBySlug(context.Context, string, string, string, string,
+		*github.TeamAddTeamRepoOptions) (*github.Response, error)
+	IsTeamRepoBySlug(context.Context, string, string, string, string) (*github.Repository, *github.Response, error)
 }
 
 // Check performs the polcy check for public policy based on the
@@ -148,31 +152,43 @@ func check(ctx context.Context, rep repositories, c *github.Client, owner,
 	}
 
 	mc := mergeConfig(oc, rc, repo)
-	admins, maintainers, err := getUsers(ctx, rep, owner, repo)
-	if err != nil {
-		return nil, err
-	}
 
 	var trustedAdmins []string
 	var trustedMaintainers []string
-	// check that at least one trusted admin team is an admin
+
+	// check that at all trusted admin teams are admins
 	// this will typically be the open source team
-	for _, admin := range admins {
-		for _, tcs := range mc.TrustedAdminTeams {
-			if admin == tcs {
-				trustedAdmins = append(trustedAdmins, tcs)
-			}
+	for _, tcs := range mc.TrustedAdminTeams {
+		hasRole, err := teamHasRepoRole(ctx, c.Teams, owner, tcs, owner, repo, "admin")
+		if err != nil {
+			log.Error().Str("org", owner).
+				Str("repo", repo).
+				Str("team", tcs).
+				Str("area", polName).
+				Err(err).
+				Msg("Unexpected error looking up team.")
 		}
-	}
-	for _, maintainer := range maintainers {
-		for _, tcs := range mc.TrustedMaintainTeams {
-			if maintainer == tcs {
-				trustedMaintainers = append(trustedMaintainers, tcs)
-			}
+		if hasRole {
+			trustedAdmins = append(trustedAdmins, tcs)
 		}
 	}
 
-	if len(trustedAdmins) == 0 || len(trustedMaintainers) == 0 {
+	for _, tcs := range mc.TrustedAdminTeams {
+		hasRole, err := teamHasRepoRole(ctx, c.Teams, owner, tcs, owner, repo, "maintain")
+		if err != nil {
+			log.Error().Str("org", owner).
+				Str("repo", repo).
+				Str("team", tcs).
+				Str("area", polName).
+				Err(err).
+				Msg("Unexpected error looking up team.")
+		}
+		if hasRole {
+			trustedMaintainers = append(trustedMaintainers, tcs)
+		}
+	}
+
+	if len(trustedAdmins) != len(mc.TrustedAdminTeams) || len(trustedMaintainers) != len(mc.TrustedMaintainTeams) {
 		return &policydef.Result{
 			Enabled:    enabled,
 			Pass:       false,
@@ -188,103 +204,68 @@ func check(ctx context.Context, rep repositories, c *github.Client, owner,
 	}, nil
 }
 
-func getUsers(ctx context.Context, r repositories, owner, repo string) ([]string, []string, error) {
-	opt := &github.ListCollaboratorsOptions{
-		ListOptions: github.ListOptions{
-			PerPage: 100,
-		},
-		Affiliation: "direct",
-	}
-	var users []*github.User
-	for {
-		us, resp, err := r.ListCollaborators(ctx, owner, repo, opt)
-		if err != nil {
-			return nil, nil, err
+func teamHasRepoRole(ctx context.Context, t teams, org, slug, owner, repo, role string) (bool, error) {
+
+	r, resp, err := t.IsTeamRepoBySlug(ctx, org, slug, owner, repo)
+	if err != nil {
+		// check if the error is because the team does not have access to the repo
+		if resp != nil && resp.StatusCode == 404 {
+			return false, nil
 		}
-		users = append(users, us...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.Page = resp.NextPage
+		return false, err
 	}
 
-	var adminUsers []string
-	var maintainUsers []string
-	for _, u := range users {
-		if u.GetPermissions()["admin"] {
-			adminUsers = append(adminUsers, u.GetLogin())
-		} else if u.GetPermissions()["maintainer"] {
-			maintainUsers = append(maintainUsers, u.GetLogin())
-		}
-	}
-	return adminUsers, maintainUsers, nil
+	// whether the team has membership to the repo and the requested role
+	return r.Permissions[role], nil
 }
 
 // Fix implementing policydef.Policy.Fix().
 func (s Public) Fix(ctx context.Context, c *github.Client, owner, repo string) error {
-	return fix(ctx, c.Repositories, c, owner, repo)
+	return fix(ctx, c.Repositories, c.Teams, c, owner, repo)
 }
 
-func fix(ctx context.Context, rep repositories, c *github.Client,
+func fix(ctx context.Context, rep repositories, team teams, c *github.Client,
 	owner, repo string) error {
+
+	log.Info().
+		Str("org", owner).
+		Str("repo", repo).
+		Str("area", polName).
+		Bool("enabled", true).
+		Msg("Fix")
+
 	oc, rc := getConfig(ctx, c, owner, repo)
-	enabled, err := configIsEnabled(ctx, oc.OptConfig, rc.OptConfig, c, owner, repo)
-	if err != nil {
-		return err
-	}
-	if !enabled {
-		return nil
-	}
 	mc := mergeConfig(oc, rc, repo)
 
-	admins, maintainers, err := getUsers(ctx, rep, owner, repo)
-	if err != nil {
-		return err
-	}
+	for _, slug := range mc.TrustedAdminTeams {
+		// we can just add directly here, no need to check if already a member
+		// since the GitHub api handles this and just returns a 204
+		_, err := team.AddTeamRepoBySlug(ctx, owner, slug, owner, repo, &github.TeamAddTeamRepoOptions{Permission: "admin"})
+		if err != nil {
+			log.Error().Str("org", owner).
+				Str("repo", repo).
+				Str("user", slug).
+				Str("area", polName).
+				Str("file", configFile).
+				Err(err).
+				Msg("Unexpected error adding new admin.")
+		}
 
-	// check that at least one trusted admin team is an admin
-	// this will typically be the open source team
-	for _, tcs := range mc.TrustedAdminTeams {
-		isSet := false // the TrustedAdmin is not present
-		for _, admin := range admins {
-			if admin == tcs {
-				isSet = true
-				break
-			}
-		}
-		if !isSet { // TrustedAdmin is not present, add them
-			_, _, err := rep.AddCollaborator(ctx, owner, repo, tcs, &github.RepositoryAddCollaboratorOptions{Permission: "admin"})
-			if err != nil {
-				log.Error().Str("org", owner).
-					Str("repo", repo).
-					Str("user", tcs).
-					Str("area", polName).
-					Str("file", configFile).
-					Err(err).
-					Msg("Unexpected error adding new admin.")
-			}
-		}
 	}
-	for _, tcs := range mc.TrustedMaintainTeams {
-		isSet := false // the TrustedMaintainer is not present
-		for _, maintainer := range maintainers {
-			if maintainer == tcs {
-				isSet = true
-				break
-			}
+	for _, slug := range mc.TrustedMaintainTeams {
+		// we can just add directly here, no need to check if already a member
+		// since the GitHub api handles this and just returns a 204
+		_, err := team.AddTeamRepoBySlug(ctx, owner, slug, owner, repo, &github.TeamAddTeamRepoOptions{Permission: "maintain"})
+		if err != nil {
+			log.Error().Str("org", owner).
+				Str("repo", repo).
+				Str("user", slug).
+				Str("area", polName).
+				Str("file", configFile).
+				Err(err).
+				Msg("Unexpected error adding new maintainer.")
 		}
-		if !isSet { // TrustedMaintainers is not present, add them
-			_, _, err := rep.AddCollaborator(ctx, owner, repo, tcs, &github.RepositoryAddCollaboratorOptions{Permission: "maintain"})
-			if err != nil {
-				log.Error().Str("org", owner).
-					Str("repo", repo).
-					Str("user", tcs).
-					Str("area", polName).
-					Str("file", configFile).
-					Err(err).
-					Msg("Unexpected error adding new maintainer.")
-			}
-		}
+
 	}
 	return nil
 }
@@ -328,7 +309,9 @@ func getConfig(ctx context.Context, c *github.Client, owner, repo string) (*OrgC
 
 func mergeConfig(oc *OrgConfig, rc *RepoConfig, repo string) *mergedConfig {
 	mc := &mergedConfig{
-		Action: oc.Action,
+		Action:               oc.Action,
+		TrustedAdminTeams:    oc.TrustedAdminTeams,
+		TrustedMaintainTeams: oc.TrustedMaintainTeams,
 	}
 
 	if !oc.OptConfig.DisableRepoOverride {
